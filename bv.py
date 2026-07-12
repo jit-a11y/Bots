@@ -40,15 +40,18 @@ class RegForm(StatesGroup):
     waiting_conditions = State()
     waiting_photo = State()
     waiting_photo2 = State()
+    waiting_admin_message = State()  # Состояние для админской отправки
 
 # ---------- КЛАВИАТУРЫ ----------
 
-def get_main_kb():
-    """Инлайн-клавиатура для выбора типа регистрации"""
+def get_main_kb(is_admin: bool = False):
+    """Инлайн-клавиатура для выбора типа регистрации с проверкой на админа"""
     buttons = [
         [InlineKeyboardButton(text="📝 Мнение ", callback_data="reg_opinion", style="primary")],
         [InlineKeyboardButton(text="⚔️ ПБ ⚔️", callback_data="reg_pb", style="danger")]
     ]
+    if is_admin:
+        buttons.append([InlineKeyboardButton(text="📢 Отправить сообщение в канал", callback_data="admin_send_to_channel", style="success")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_confirm_kb():
@@ -67,15 +70,26 @@ def get_restart_kb():
         resize_keyboard=True
     )
 
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
+
+async def is_user_admin(user_id: int) -> bool:
+    """Проверяет, является ли пользователь админом (участником модераторского чата)"""
+    try:
+        member = await bot.get_chat_member(chat_id=MOD_CHAT_ID, user_id=user_id)
+        return member.status in ["creator", "administrator", "member"]
+    except Exception:
+        return False
+
 # ---------- ОСНОВНОЕ МЕНЮ ----------
 
 async def show_main_menu(message: types.Message, state: FSMContext):
     """Показывает главное меню: инлайн-выбор + reply-кнопка перезапуска"""
     await state.clear()
+    is_admin = await is_user_admin(message.from_user.id)
     # Сообщение с инлайн-кнопками
     await message.answer(
         "Салам, статюганище! Выбери тип регистрации:",
-        reply_markup=get_main_kb()
+        reply_markup=get_main_kb(is_admin=is_admin)
     )
     # Отдельное сообщение с reply-клавиатурой (она останется внизу)
     await message.answer(
@@ -190,6 +204,14 @@ async def show_rating(message: types.Message):
     
     await message.answer(text, parse_mode="HTML")
 
+@dp.message(Command("sendtochannel"))
+async def cmd_send_to_channel(message: types.Message, state: FSMContext):
+    """Альтернативный вызов админ-функции через команду"""
+    if not await is_user_admin(message.from_user.id):
+        return
+    await state.set_state(RegForm.waiting_admin_message)
+    await message.answer("📢 Перешлите сюда любое сообщение или отправьте текст/медиа/стикер, чтобы мгновенно опубликовать в канал.")
+
 # ---------- ОБРАБОТКА REPLY-КНОПКИ ПЕРЕЗАПУСКА ----------
 
 @dp.message(F.text == "🤖 Перезапустить")
@@ -206,7 +228,31 @@ async def start_reg(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(text)
     await callback.answer()
 
+@dp.callback_query(F.data == "admin_send_to_channel")
+async def admin_send_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка нажатия на инлайн-кнопку админа"""
+    if not await is_user_admin(callback.from_user.id):
+        await callback.answer("У вас нет прав для использования этой функции.", show_alert=True)
+        return
+    await state.set_state(RegForm.waiting_admin_message)
+    await callback.message.answer("📢 Перешлите сюда любое сообщение или отправьте текст/медиа/стикер, чтобы мгновенно опубликовать в канал.")
+    await callback.answer()
+
 # ---------- ЭТАПЫ РЕГИСТРАЦИИ ----------
+
+@dp.message(RegForm.waiting_admin_message)
+async def process_admin_message(message: types.Message, state: FSMContext):
+    """Обрабатывает и пересылает абсолютно любой тип сообщения в канал от лица админа"""
+    try:
+        await message.forward(chat_id=CHANNEL_ID)
+        await message.answer("✅ Сообщение успешно опубликовано в канал!")
+    except Exception as e:
+        try:
+            await message.copy_to(chat_id=CHANNEL_ID)
+            await message.answer("✅ Сообщение успешно скопировано в канал!")
+        except Exception as ex:
+            await message.answer(f"❌ Не удалось отправить сообщение: {ex}")
+    await show_main_menu(message, state)
 
 @dp.message(RegForm.waiting_name)
 async def process_name(message: types.Message, state: FSMContext):
