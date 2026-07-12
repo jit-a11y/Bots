@@ -15,8 +15,7 @@ from aiogram.types import (
 from aiogram.enums import PollType
 from aiogram.exceptions import TelegramBadRequest
 
-# Токен теперь берется из переменной окружения OS
-TOKEN = os.getenv("BOT_TOKEN", "8970384818:AAE5t4juFl32CD54-6M3hAf3jage2KX3_dw")
+TOKEN = "8970384818:AAE5t4juFl32CD54-6M3hAf3jage2KX3_dw"
 CHANNEL_ID = -1002313831349      
 MOD_CHAT_ID = -1004252414187     
 RULES_LINK = "https://telegra.ph/Reglament-06-13-3"
@@ -41,15 +40,18 @@ class RegForm(StatesGroup):
     waiting_conditions = State()
     waiting_photo = State()
     waiting_photo2 = State()
+    waiting_admin_message = State()
 
 # ---------- КЛАВИАТУРЫ ----------
 
-def get_main_kb():
-    """Инлайн-клавиатура для выбора типа регистрации"""
+def get_main_kb(is_admin: bool = False):
+    """Инлайн-клавиатура для выбора типа регистрации с проверкой на админа"""
     buttons = [
         [InlineKeyboardButton(text="📝 Мнение ", callback_data="reg_opinion", style="primary")],
         [InlineKeyboardButton(text="⚔️ ПБ ⚔️", callback_data="reg_pb", style="danger")]
     ]
+    if is_admin:
+        buttons.append([InlineKeyboardButton(text="📢 Отправить сообщение в канал", callback_data="admin_send_to_channel", style="success")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_confirm_kb():
@@ -61,24 +63,29 @@ def get_confirm_kb():
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_restart_kb():
-    """Reply-клавиатура с кнопкой перезапуска (всегда видна внизу)"""
-    # ⚠️ Для reply-кнопок параметр style (цвет) не поддерживается Telegram API
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="🤖 Перезапустить")]],
         resize_keyboard=True
     )
 
+# ---------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ----------
+
+async def is_user_admin(user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(chat_id=MOD_CHAT_ID, user_id=user_id)
+        return member.status in ["creator", "administrator", "member"]
+    except Exception:
+        return False
+
 # ---------- ОСНОВНОЕ МЕНЮ ----------
 
 async def show_main_menu(message: types.Message, state: FSMContext):
-    """Показывает главное меню: инлайн-выбор + reply-кнопка перезапуска"""
     await state.clear()
-    # Сообщение с инлайн-кнопками
+    is_admin = await is_user_admin(message.from_user.id)
     await message.answer(
         "Салам, статюганище! Выбери тип регистрации:",
-        reply_markup=get_main_kb()
+        reply_markup=get_main_kb(is_admin=is_admin)
     )
-    # Отдельное сообщение с reply-клавиатурой (она останется внизу)
     await message.answer(
         "Для перезапуска бота нажмите кнопку ниже:",
         reply_markup=get_restart_kb()
@@ -191,13 +198,9 @@ async def show_rating(message: types.Message):
     
     await message.answer(text, parse_mode="HTML")
 
-# ---------- ОБРАБОТКА REPLY-КНОПКИ ПЕРЕЗАПУСКА ----------
-
 @dp.message(F.text == "🤖 Перезапустить")
 async def restart_handler(message: types.Message, state: FSMContext):
     await show_main_menu(message, state)
-
-# ---------- ОБРАБОТКА ИНЛАЙН-КНОПОК ВЫБОРА ТИПА ----------
 
 @dp.callback_query(F.data.in_(["reg_opinion", "reg_pb"]))
 async def start_reg(callback: types.CallbackQuery, state: FSMContext):
@@ -206,6 +209,38 @@ async def start_reg(callback: types.CallbackQuery, state: FSMContext):
     text = "Отправь имя персонажа.." if callback.data == "reg_opinion" else "Отправь имена персонажей (с новой строки).."
     await callback.message.answer(text)
     await callback.answer()
+
+@dp.callback_query(F.data == "admin_send_to_channel")
+async def admin_send_callback(callback: types.CallbackQuery, state: FSMContext):
+    if not await is_user_admin(callback.from_user.id):
+        await callback.answer("У вас нет прав.", show_alert=True)
+        return
+    await state.set_state(RegForm.waiting_admin_message)
+    await callback.message.answer("📢 Перешлите сюда любое сообщение, чтобы переслать его с автором, ИЛИ просто отправьте текст/медиа, чтобы опубликовать его обычно.")
+    await callback.answer()
+
+# ---------- ЛОГИКА АДМИН-ОТПРАВКИ ----------
+
+@dp.message(RegForm.waiting_admin_message)
+async def process_admin_message(message: types.Message, state: FSMContext):
+    # Проверяем, является ли сообщение пересланным
+    is_forward = (message.forward_origin is not None or 
+                  message.forward_from is not None or 
+                  message.forward_from_chat is not None)
+    
+    try:
+        if is_forward:
+            # Если это пересылка, сохраняем "эффект пересылки"
+            await message.forward(chat_id=CHANNEL_ID)
+            await message.answer("✅ Переслано в канал!")
+        else:
+            # Если это обычное сообщение, копируем контент (публикуется как обычный пост)
+            await message.copy_to(chat_id=CHANNEL_ID)
+            await message.answer("✅ Опубликовано в канал!")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+    
+    await show_main_menu(message, state)
 
 # ---------- ЭТАПЫ РЕГИСТРАЦИИ ----------
 
@@ -373,4 +408,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-  
